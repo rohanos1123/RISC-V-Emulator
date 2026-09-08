@@ -18,8 +18,27 @@ struct Clocked{
     public: 
         T curr; 
         T future;
+        bool frozen; 
+
+        Clocked()
+        {}
+
+        Clocked(T init)
+        : curr(init)
+        {}
+
         void tick(){
-            curr = future; 
+            if(!frozen){
+                curr = future; 
+            }
+        }
+
+        void freeze(){
+            frozen = true; 
+        }
+
+        void unfreeze(){
+            frozen = false; 
         }
 }; 
 
@@ -40,8 +59,9 @@ class RISC_V_CPU{
 
         struct ID_EX{
             bool exit = false; 
-            uint64_t instr_address = 0; 
+            bool stalled = false; 
 
+            uint64_t instr_address = 0; 
             uint8_t ctl_wb = 0; 
             uint8_t ctl_m = 0; 
             uint8_t ctl_ex = 0;  
@@ -54,10 +74,13 @@ class RISC_V_CPU{
             uint64_t rd_reg1 = 0; 
             uint64_t rd_reg2 = 0; 
             uint64_t immediate = 0;  
+            
         }; 
 
         struct EX_MEM{
             bool exit = false; 
+            bool stalled = false; 
+
             uint64_t instr_address = 0; 
 
             uint8_t ctl_wb = 0; 
@@ -67,11 +90,14 @@ class RISC_V_CPU{
             uint64_t rd_reg2 = 0; 
             uint64_t alu_res = 0; 
             uint64_t jmp_addr = 0; 
+            
         }; 
 
 
         struct MEM_WB{
             bool exit = false; 
+            bool stalled = false; 
+
             uint64_t instr_address = 0; 
 
             uint8_t ctl_wb = 0; 
@@ -81,7 +107,7 @@ class RISC_V_CPU{
         }; 
 
     private: 
-
+        
         /*
             Memory Units
         */
@@ -305,33 +331,28 @@ class RISC_V_CPU{
             }
         }
 
-        void process_forward(uint64_t &read_val, const uint64_t& alternative, const uint8_t& fwd_code){
-            switch(fwd_code){
-                case 0:{
-                    read_val = alternative; 
-                    break;
-                }
-                case 0b01: {
-                    std::cout<<"EX: MEM/WB Hazard Forwarded"<<std::endl; 
-                    bool mem_to_reg = (mem_wb_reg.curr.ctl_wb & 0b1); 
-                    if(mem_to_reg){
-                        read_val = mem_wb_reg.curr.rd_data;
-                    }
-                    else{
-                        read_val = mem_wb_reg.curr.alu_res; 
-                    }
-                    break; 
-                }
-                case 0b10:{ 
-                    std::cout<<"EX: EX/MEM Hazard Forwarded"<<std::endl; 
-                    read_val = ex_mem_reg.curr.alu_res; 
-                    break; 
-                }
-                default:
-                    throw std::invalid_argument("Unsupported data forwarding argument for A: " + std::to_string(fwd_code)); 
-            }
 
+        /*
+            "Hacks the control if a load if floowed by an r-type"
+        */
+
+        void hazard_detection_unit(uint8_t new_rs1, uint8_t new_rs2){
+            uint8_t id_ex_mem_read = (id_ex_reg.curr.ctl_m >> 1) & 0b1; 
+            if(id_ex_mem_read){
+                if((id_ex_reg.curr.wr_reg == new_rs1) || (id_ex_reg.curr.wr_reg == new_rs2)){
+                    // Zero out all control signals to stall pipeline 
+                    std::cout<<"LOAD FOUND"<<std::endl; 
+                    
+                    id_ex_reg.future.ctl_ex = 0; 
+                    id_ex_reg.future.ctl_m = 0; 
+                    id_ex_reg.future.ctl_wb = 0; 
+                    id_ex_reg.future.stalled = true; 
+                    PC.freeze(); 
+                    if_id_reg.freeze(); 
+                }
+            }
         }
+
 
 
     private:
@@ -341,7 +362,6 @@ class RISC_V_CPU{
     
 
         void if_stage(){
-
             if_instr = PC.curr; 
             if_id_reg.future.instr_address = PC.curr; 
 
@@ -350,9 +370,13 @@ class RISC_V_CPU{
         }
 
         void id_stage(){
-            Instruction new_instr; 
+            PC.unfreeze();
+            if_id_reg.unfreeze(); 
+
+
+            Instruction new_instr;
             id_ex_reg.future.instr_address = if_id_reg.curr.instr_address; 
-            
+           
             decodeInstruction(if_id_reg.curr.instruction, new_instr); 
              
             if(new_instr.opcode == EXIT_SIM_OPCODE){
@@ -362,19 +386,31 @@ class RISC_V_CPU{
            
             RegisterRead(new_instr.rs1, new_instr.rs2,id_ex_reg.future.rd_reg1, id_ex_reg.future.rd_reg2);
             id_ex_reg.future.immediate = new_instr.immediate; 
-            id_ex_reg.future.pc = PC.curr; 
             id_ex_reg.future.wr_reg = new_instr.rd; 
             id_ex_reg.future.reg1 = new_instr.rs1;
             id_ex_reg.future.reg2 = new_instr.rs2; 
 
 
             Control(new_instr, id_ex_reg.future.ctl_ex, id_ex_reg.future.ctl_m, id_ex_reg.future.ctl_wb); 
+            
+            // Zeros out control if the load + read condition is met. 
+            hazard_detection_unit(new_instr.rs1, new_instr.rs2); 
+            
             id_ex_reg.future.funct3 = new_instr.funct3; 
             id_ex_reg.future.funct7 = new_instr.funct7; 
+
         }
 
         void ex_stage(){
             ex_mem_reg.future.instr_address = id_ex_reg.curr.instr_address; 
+
+            /**/
+            if(id_ex_reg.curr.stalled){
+                id_ex_reg.future.stalled = false; 
+                ex_mem_reg.future.instr_address = 0; 
+                ex_mem_reg.future.stalled = true; 
+                return; 
+            }
 
             uint8_t fwd_a = 0;
             uint8_t fwd_b = 0;  
@@ -409,6 +445,14 @@ class RISC_V_CPU{
         void mem_stage(){
             mem_wb_reg.future.instr_address = ex_mem_reg.curr.instr_address; 
 
+            if(ex_mem_reg.curr.stalled){
+                ex_mem_reg.future.stalled = false; 
+                mem_wb_reg.future.instr_address = 0; 
+                mem_wb_reg.future.stalled = true; 
+                return; 
+            }
+
+
             if(ex_mem_reg.curr.exit){
                 in_op = false; 
                 return; 
@@ -439,6 +483,12 @@ class RISC_V_CPU{
         void wb_stage(){
             wb_instr.future = mem_wb_reg.curr.instr_address;
 
+            if(mem_wb_reg.curr.stalled){
+                mem_wb_reg.future.stalled = false; 
+                wb_instr.future = 0; 
+                return; 
+            }
+
             auto reg_write_cd = (mem_wb_reg.curr.ctl_wb >> 1) & 0b1; 
             uint8_t mem_to_reg =  mem_wb_reg.curr.ctl_wb & 0b1; 
             uint64_t write_val = 0; 
@@ -467,7 +517,14 @@ class RISC_V_CPU{
         }
 
         void advance_cycle(){
-        
+
+            print_pipeline(); 
+
+            if(cycle == 6){
+                std::cout<<"word"<<std::endl; 
+            }
+
+
             wb_stage();
             if_stage();
             id_stage(); 
@@ -483,7 +540,7 @@ class RISC_V_CPU{
 
              cycle++;  
 
-            print_pipeline(); 
+            
         }
 
         void print_pipeline(){
@@ -501,6 +558,8 @@ class RISC_V_CPU{
                 advance_cycle(); 
                 std::this_thread::sleep_for(std::chrono::milliseconds(clock_period)); 
             }
+            std::cout<<"FINAL: "<<std::endl;
+            print_pipeline(); 
         }
 }; 
 
