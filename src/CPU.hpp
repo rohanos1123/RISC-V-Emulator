@@ -40,6 +40,11 @@ struct Clocked{
         void unfreeze(){
             frozen = false; 
         }
+
+        void flush(){
+            std::memset((void*)(&future), 0, sizeof(T)); 
+        }
+
 }; 
 
 
@@ -74,7 +79,7 @@ class RISC_V_CPU{
             uint64_t rd_reg1 = 0; 
             uint64_t rd_reg2 = 0; 
             uint64_t immediate = 0;  
-            
+
         }; 
 
         struct EX_MEM{
@@ -193,7 +198,7 @@ class RISC_V_CPU{
         }
 
         void RegisterWrite(const uint8_t& reg_write_ctl, const uint8_t& dest_reg, const uint64_t& write_data){            
-            if(reg_write_ctl){
+            if(reg_write_ctl && dest_reg != 0){
                 std::cout<<"Writing "<<write_data<<" to reg "<<(int)dest_reg<<" in cycle "<<cycle<<std::endl; 
                 ProgramRegisters[dest_reg] = write_data; 
             }
@@ -215,34 +220,38 @@ class RISC_V_CPU{
                 case R_TYPE_OPCODE:
                     exec_ctl = 0b100;
                     mem_ctl = 0b000;
-                    wb_ctl = 0b10;  
+                    wb_ctl = 0b100;  
                     break;
                 case I_TYPE_LOAD_OPCODE: 
                     exec_ctl = 0b001;
                     mem_ctl = 0b010;
-                    wb_ctl = 0b11; 
+                    wb_ctl = 0b101; 
                     break; 
                 case I_TYPE_MATH_OPCODE:
                     exec_ctl = 0b101;
                     mem_ctl = 0b000;
-                    wb_ctl = 0b10; 
+                    wb_ctl = 0b100; 
                     break; 
                 case S_TYPE_OPCODE:
                     exec_ctl = 0b001; 
                     mem_ctl = 0b001; 
-                    wb_ctl = 0b00; 
+                    wb_ctl = 0b000; 
                     break; 
                 case SB_TYPE_OPCODE:
                     exec_ctl = 0b010;
                     mem_ctl  = 0b100; 
-                    wb_ctl =  0b00; 
+                    wb_ctl =  0b000; 
+                    break; 
+                case J_TYPE_OPCODE:
+                    exec_ctl = 0b001; 
+                    mem_ctl = 0b000; 
+                    wb_ctl = 0b110; 
                     break; 
                 case EXIT_SIM_OPCODE:
-                    break; 
                 case NOP_OPCODE:
                     break; 
                 default:
-                    throw std::invalid_argument("Unimplemented OPCODE of type: " + std::to_string(instruction.opcode)); 
+                    throw std::invalid_argument("Control: Unimplemented OPCODE of type: " + std::to_string(instruction.opcode)); 
             }
         }
 
@@ -287,47 +296,77 @@ class RISC_V_CPU{
             }
         }
 
-        void forwarding_unit(uint8_t &fwd_a, uint8_t &fwd_b){
+        /*
+            Forwards data from the EX-MEM pipeline register and MEM-WB pipeline register to the EX stage
+        */
+
+
+        void forwarding_unit(const uint8_t reg_1, const uint8_t reg_2, uint64_t& reg_val1, uint64_t& reg_val2 ){
+
             uint8_t ex_reg_write = (ex_mem_reg.curr.ctl_wb >> 1); 
-            fwd_a = 0;
-            fwd_b = 0; 
+            bool reg1_write = false; 
+            bool reg2_write = false; 
+
             if((ex_mem_reg.curr.wr_reg != 0) && ex_reg_write){
                 auto ex_mem_rd = ex_mem_reg.curr.wr_reg; 
-                if(id_ex_reg.curr.reg1 == ex_mem_rd){
-                    fwd_a = 0b10;  
-                    id_ex_reg.curr.rd_reg1 = ex_mem_reg.curr.alu_res; 
+                if(reg_1 == ex_mem_rd){
+                    std::cout<<"Forwarded from ex/mem value "<<mem_wb_reg.curr.alu_res<<" for register "<<(int)reg_1<<std::endl; 
+                    reg_val1 = ex_mem_reg.curr.alu_res; 
                 }
 
-                if(id_ex_reg.curr.reg2 == ex_mem_rd){
-                    fwd_b = 0b10; 
-                    id_ex_reg.curr.rd_reg2 = ex_mem_reg.curr.alu_res; 
+                if(reg_2 == ex_mem_rd){
+                    std::cout<<"Forwarded from ex/mem value "<<mem_wb_reg.curr.alu_res<<" for register "<<(int)reg_2<<std::endl; 
+                    reg_val2 = ex_mem_reg.curr.alu_res; 
                 }
             }
 
+
             uint8_t mem_reg_write = (mem_wb_reg.curr.ctl_wb  >> 1); 
-            if(mem_reg_write && (mem_wb_reg.curr.wr_reg != 0)){
+            if(mem_reg_write && (mem_wb_reg.curr.wr_reg != 0) and !(ex_reg_write && (ex_mem_reg.curr.wr_reg != 0))){
                 auto mem_wb_rd = mem_wb_reg.curr.wr_reg;
-                if(id_ex_reg.curr.reg1 == mem_wb_rd){
-                    fwd_a = 0b01; 
+                if(reg_1 == mem_wb_rd && !(ex_mem_reg.curr.wr_reg == reg_1)){
                     bool mem_to_reg = (mem_wb_reg.curr.ctl_wb & 0b1); 
                     if(mem_to_reg){
-                        id_ex_reg.curr.rd_reg1 = mem_wb_reg.curr.rd_data;
+                        std::cout<<"Forwarded from mem/wb "<<mem_wb_reg.curr.rd_data<<" for register "<<(int)reg_1<<std::endl; 
+                        reg_val1 = mem_wb_reg.curr.rd_data;
                     }
                     else{
-                        id_ex_reg.curr.rd_reg1 = mem_wb_reg.curr.alu_res; 
+                        std::cout<<"Forwarded from mem/wb "<<mem_wb_reg.curr.alu_res<<" for register "<<(int)reg_1<<std::endl; 
+                        reg_val1 = mem_wb_reg.curr.alu_res; 
                     }
                 }
 
-                if(id_ex_reg.curr.reg2 == mem_wb_rd){
-                    fwd_b = 0b01; 
+                if(reg_2 == mem_wb_rd && !(ex_mem_reg.curr.wr_reg == reg_2)){
                     bool mem_to_reg = (mem_wb_reg.curr.ctl_wb & 0b1); 
                     if(mem_to_reg){
-                        id_ex_reg.curr.rd_reg2 = mem_wb_reg.curr.rd_data;
+                        std::cout<<"Forwarded from mem/wb "<<mem_wb_reg.curr.rd_data<<" for register "<<(int)reg_2<<std::endl; 
+                        reg_val2 = mem_wb_reg.curr.rd_data;
                     }
                     else{
-                        id_ex_reg.curr.rd_reg2 = mem_wb_reg.curr.alu_res; 
+                        std::cout<<"Forwarded from mem/wb "<<mem_wb_reg.curr.alu_res<<" for register "<<(int)reg_2<<std::endl; 
+                        reg_val2 = mem_wb_reg.curr.alu_res; 
                     }
                 }
+            }
+        }
+
+
+        /*
+            Forwards data from the ID-EX, EX-MEM and MEM-WB Pipeline
+        */
+
+
+        void determine_branch_stall(const uint8_t reg_1, const uint8_t reg_2, uint64_t& reg_val1, uint64_t& reg_val2 ){
+            
+            uint8_t id_reg_write = id_ex_reg.curr.ctl_wb >> 1;
+            if(id_reg_write){
+                auto reg_to_write = id_ex_reg.curr.wr_reg; 
+                if(reg_to_write == reg_1 || reg_to_write == reg_2){
+                    std::cout<<"BRANCH EXPECTATION STALL"<<std::endl; 
+                    PC.freeze();
+                    if_id_reg.freeze(); 
+                    id_ex_reg.flush(); 
+                }   
             }
         }
 
@@ -342,14 +381,42 @@ class RISC_V_CPU{
                 if((id_ex_reg.curr.wr_reg == new_rs1) || (id_ex_reg.curr.wr_reg == new_rs2)){
                     // Zero out all control signals to stall pipeline 
                     std::cout<<"LOAD FOUND"<<std::endl; 
-                    
-                    id_ex_reg.future.ctl_ex = 0; 
-                    id_ex_reg.future.ctl_m = 0; 
-                    id_ex_reg.future.ctl_wb = 0; 
-                    id_ex_reg.future.stalled = true; 
                     PC.freeze(); 
                     if_id_reg.freeze(); 
+                    id_ex_reg.flush(); 
                 }
+            }
+        }
+
+
+        /*
+            Branch forwarding units for R-type compatibility with Register
+        */ 
+
+
+        bool EvaluateBranch(const uint64_t rs1_res, const uint64_t rs2_res,  const uint8_t funct3){
+            switch(funct3){
+                case 0x0:
+                    return rs1_res == rs2_res; 
+                    break;
+                case 0x1: 
+                    return rs1_res != rs2_res; 
+                    break; 
+                case 0x4:
+                    return rs1_res < rs2_res;
+                    break; 
+                case 0x5:
+                    return rs1_res >= rs2_res; 
+                    break; 
+                case 0x6:
+                    return rs1_res < rs2_res; 
+                    break; 
+                case 0x7: 
+                    return rs1_res >= rs2_res; 
+                    break; 
+                default: 
+                    std::invalid_argument("Could not evaluate funct3 for branch"); 
+                    return 0; 
             }
         }
 
@@ -376,6 +443,9 @@ class RISC_V_CPU{
 
             Instruction new_instr;
             id_ex_reg.future.instr_address = if_id_reg.curr.instr_address; 
+            if(if_id_reg.curr.instr_address == 140){
+                std::cout<<"king"; 
+            }
            
             decodeInstruction(if_id_reg.curr.instruction, new_instr); 
              
@@ -384,18 +454,52 @@ class RISC_V_CPU{
                 return; 
             }
            
-            RegisterRead(new_instr.rs1, new_instr.rs2,id_ex_reg.future.rd_reg1, id_ex_reg.future.rd_reg2);
+            uint64_t rs1_result = 0; 
+            uint64_t rs2_result = 0; 
+            RegisterRead(new_instr.rs1, new_instr.rs2,rs1_result, rs2_result);
             id_ex_reg.future.immediate = new_instr.immediate; 
             id_ex_reg.future.wr_reg = new_instr.rd; 
             id_ex_reg.future.reg1 = new_instr.rs1;
             id_ex_reg.future.reg2 = new_instr.rs2; 
+            id_ex_reg.future.rd_reg1 = rs1_result; 
+            id_ex_reg.future.rd_reg2 = rs2_result; 
 
 
-            Control(new_instr, id_ex_reg.future.ctl_ex, id_ex_reg.future.ctl_m, id_ex_reg.future.ctl_wb); 
+            // Control calculation
+            uint8_t mem_ctl = 0; 
+            Control(new_instr, id_ex_reg.future.ctl_ex, mem_ctl, id_ex_reg.future.ctl_wb); 
+            bool jump_instr = new_instr.opcode == J_TYPE_OPCODE || new_instr.opcode == I_TYPE_JALR_OPCODE; 
+            id_ex_reg.future.ctl_m = mem_ctl; 
+            bool branch_instruction = mem_ctl >> 2; 
+
+
             
             // Zeros out control if the load + read condition is met. 
             hazard_detection_unit(new_instr.rs1, new_instr.rs2); 
+    
+            // ADD the PC to the immediate branch value using the dedicated adder in the ID stqage
+            auto branch_target = if_id_reg.curr.instr_address + new_instr.immediate;
+
             
+   
+
+            /*
+                Policy: Assume Branch Not Taken For Now
+            */
+            forwarding_unit(new_instr.rs1, new_instr.rs2, rs1_result, rs2_result); 
+            if(branch_instruction){  
+                determine_branch_stall(new_instr.rs1, new_instr.rs2, rs1_result, rs2_result); 
+            }
+           
+            bool branch_taken = jump_instr || (branch_instruction && EvaluateBranch(rs1_result, rs2_result, new_instr.funct3));  
+            if(branch_taken){
+                if_id_reg.flush(); 
+                PC.future = branch_target; 
+            }
+            else{
+                PC.future = PC.curr + 4; 
+            }
+
             id_ex_reg.future.funct3 = new_instr.funct3; 
             id_ex_reg.future.funct7 = new_instr.funct7; 
 
@@ -404,17 +508,11 @@ class RISC_V_CPU{
         void ex_stage(){
             ex_mem_reg.future.instr_address = id_ex_reg.curr.instr_address; 
 
-            /**/
-            if(id_ex_reg.curr.stalled){
-                id_ex_reg.future.stalled = false; 
-                ex_mem_reg.future.instr_address = 0; 
-                ex_mem_reg.future.stalled = true; 
-                return; 
+            if(id_ex_reg.curr.instr_address == 168){
+                std::cout<<"hello";
             }
 
-            uint8_t fwd_a = 0;
-            uint8_t fwd_b = 0;  
-            forwarding_unit(fwd_a, fwd_b); 
+            forwarding_unit(id_ex_reg.curr.reg1, id_ex_reg.curr.reg2, id_ex_reg.curr.rd_reg1, id_ex_reg.curr.rd_reg2); 
 
             ex_mem_reg.future.ctl_m = id_ex_reg.curr.ctl_m;
             ex_mem_reg.future.ctl_wb = id_ex_reg.curr.ctl_wb; 
@@ -445,28 +543,11 @@ class RISC_V_CPU{
         void mem_stage(){
             mem_wb_reg.future.instr_address = ex_mem_reg.curr.instr_address; 
 
-            if(ex_mem_reg.curr.stalled){
-                ex_mem_reg.future.stalled = false; 
-                mem_wb_reg.future.instr_address = 0; 
-                mem_wb_reg.future.stalled = true; 
-                return; 
-            }
-
-
             if(ex_mem_reg.curr.exit){
                 in_op = false; 
                 return; 
             } 
-         
-            uint8_t branch_signal = (ex_mem_reg.curr.ctl_m >> 2); 
-
-            if(ex_mem_reg.curr.zero && branch_signal){
-                PC.future = ex_mem_reg.curr.jmp_addr; 
-            }
-            else{
-                PC.future = PC.curr + 4; 
-            }
-
+        
             mem_wb_reg.future.ctl_wb = ex_mem_reg.curr.ctl_wb; 
             mem_wb_reg.future.alu_res = ex_mem_reg.curr.alu_res; 
             mem_wb_reg.future.wr_reg = ex_mem_reg.curr.wr_reg; 
@@ -483,21 +564,24 @@ class RISC_V_CPU{
         void wb_stage(){
             wb_instr.future = mem_wb_reg.curr.instr_address;
 
-            if(mem_wb_reg.curr.stalled){
-                mem_wb_reg.future.stalled = false; 
-                wb_instr.future = 0; 
-                return; 
-            }
+            auto reg_write_cd = (mem_wb_reg.curr.ctl_wb >> 2) & 0b1; 
+            uint8_t wb_mode =  mem_wb_reg.curr.ctl_wb & 0b011; 
 
-            auto reg_write_cd = (mem_wb_reg.curr.ctl_wb >> 1) & 0b1; 
-            uint8_t mem_to_reg =  mem_wb_reg.curr.ctl_wb & 0b1; 
             uint64_t write_val = 0; 
 
-            if(mem_to_reg){
-                write_val = mem_wb_reg.curr.rd_data; 
-            }
-            else{
-                write_val = mem_wb_reg.curr.alu_res; 
+            switch(wb_mode){
+                case 0b00:
+                    write_val = mem_wb_reg.curr.alu_res; 
+                    break;
+                case 0b01: 
+                    write_val = mem_wb_reg.curr.rd_data; 
+                    break; 
+                case 0b10: 
+                    write_val = PC.curr + 4; 
+                    break; 
+                case 0b11: 
+                    // Add writeback of immediate for LUI instructions
+                    break; 
             }
 
             RegisterWrite(reg_write_cd, mem_wb_reg.curr.wr_reg, write_val); 
@@ -517,19 +601,14 @@ class RISC_V_CPU{
         }
 
         void advance_cycle(){
-
-            print_pipeline(); 
-
-            if(cycle == 6){
-                std::cout<<"word"<<std::endl; 
-            }
-
+           
+            std::cout<<"---------------------------------------------"<<std::endl; 
 
             wb_stage();
             if_stage();
             id_stage(); 
             ex_stage(); 
-            mem_stage();    
+            mem_stage();   
 
             if_id_reg.tick();
             id_ex_reg.tick();
@@ -538,7 +617,9 @@ class RISC_V_CPU{
             PC.tick(); 
             wb_instr.tick(); 
 
-             cycle++;  
+            print_pipeline(); 
+
+            cycle++;  
 
             
         }
@@ -550,7 +631,6 @@ class RISC_V_CPU{
             std::cout<<"EX: "<<ex_mem_reg.curr.instr_address<<std::endl; 
             std::cout<<"MEM: "<<mem_wb_reg.curr.instr_address<<std::endl; 
             std::cout<<"WB: "<<wb_instr.curr<<std::endl;  
-            std::cout<<"---------------------------------------------"<<std::endl; 
         }
 
         void run(){
@@ -558,8 +638,10 @@ class RISC_V_CPU{
                 advance_cycle(); 
                 std::this_thread::sleep_for(std::chrono::milliseconds(clock_period)); 
             }
+            std::cout<<"---------------------------------------------"<<std::endl; 
             std::cout<<"FINAL: "<<std::endl;
             print_pipeline(); 
+            std::cout<<"---------------------------------------------"<<std::endl; 
         }
 }; 
 

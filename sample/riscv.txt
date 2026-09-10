@@ -1,9 +1,18 @@
-addi x1, x0, 5;         // 128
-addi x3, x1, 10;        // 132
-addi x2, x1, 10;        // 136
-sd  x2, 300(x0);        // 140
-ld x4, 300(x0);
-nop; 
-add x5, x4, x2;
-sd x5, 328(x0);
-exit;                   // 144
+addi x1, x0, 288;       // 128
+addi x3, x0, 10;        // 132
+addi x2, x0, 10;        // 136
+beq x3, x2, ans;        // 140
+sd x1, 300(x0);
+addi x6, x0, 47;        // 144
+sd x6, 328(x0);         // 148
+jal x0, end_if;         // 152
+ans: 
+addi x5, x0, 69;        // 156
+sd x5, 328(x0);         // 160
+end_if: 
+add x4, x2, x3;         // 164
+ld x7, 328(x0);         // 168
+add x7, x7, x4;         // 172
+sd x7, 328(x0);         // 176
+
+exit;                   // 180
